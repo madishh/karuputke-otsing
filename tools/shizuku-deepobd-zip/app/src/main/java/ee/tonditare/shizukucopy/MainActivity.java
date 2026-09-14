@@ -25,23 +25,48 @@ public class MainActivity extends Activity {
     private TextView log;
     private EditText zipPath;
     private ICopyService service;
+    private boolean binding;
+
+    private final Shizuku.OnBinderReceivedListener binderReceivedListener = () -> {
+        append("Shizuku binder received.");
+        refreshStatus();
+        if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
+            bindService();
+        } else {
+            append("Shizuku is running; permission is not granted yet.");
+        }
+    };
+
+    private final Shizuku.OnBinderDeadListener binderDeadListener = () -> {
+        service = null;
+        binding = false;
+        append("Shizuku binder disconnected.");
+        refreshStatus();
+    };
 
     private final Shizuku.OnRequestPermissionResultListener permissionListener = (requestCode, grantResult) -> {
         if (requestCode == REQ_SHIZUKU) {
-            if (grantResult == PackageManager.PERMISSION_GRANTED) { append("Shizuku permission granted."); bindService(); }
-            else append("Shizuku permission denied.");
+            if (grantResult == PackageManager.PERMISSION_GRANTED) {
+                append("Shizuku permission granted.");
+                bindService();
+            } else {
+                append("Shizuku permission denied.");
+            }
             refreshStatus();
         }
     };
 
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+            binding = false;
             service = ICopyService.Stub.asInterface(binder);
             append("Privileged UserService connected.");
             refreshStatus();
             findNewestZip();
         }
+
         @Override public void onServiceDisconnected(ComponentName name) {
+            binding = false;
             service = null;
             append("UserService disconnected.");
             refreshStatus();
@@ -50,10 +75,11 @@ public class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        Shizuku.addRequestPermissionResultListener(permissionListener);
         buildUi();
+        Shizuku.addRequestPermissionResultListener(permissionListener);
+        Shizuku.addBinderDeadListener(binderDeadListener);
+        Shizuku.addBinderReceivedListenerSticky(binderReceivedListener);
         refreshStatus();
-        if (Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) bindService();
     }
 
     private void buildUi() {
@@ -124,48 +150,92 @@ public class MainActivity extends Activity {
         boolean running = Shizuku.pingBinder();
         int perm = running ? Shizuku.checkSelfPermission() : PackageManager.PERMISSION_DENIED;
         int uid = running ? Shizuku.getUid() : -1;
-        status.setText("Shizuku: " + (running ? "RUNNING" : "NOT RUNNING") + " | permission: " + (perm == PackageManager.PERMISSION_GRANTED ? "YES" : "NO") + " | uid: " + uid + " | service: " + (service != null ? "CONNECTED" : "NO"));
+        status.setText("Shizuku: " + (running ? "RUNNING" : "WAITING")
+                + " | permission: " + (perm == PackageManager.PERMISSION_GRANTED ? "YES" : "NO")
+                + " | uid: " + uid
+                + " | service: " + (service != null ? "CONNECTED" : (binding ? "CONNECTING" : "NO")));
     }
 
     private void requestPermission() {
-        if (!Shizuku.pingBinder()) { append("Start Shizuku first."); refreshStatus(); return; }
-        if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) { append("Permission already granted."); bindService(); }
-        else if (!Shizuku.shouldShowRequestPermissionRationale()) Shizuku.requestPermission(REQ_SHIZUKU);
-        else append("Permission was denied before. Allow this app in Shizuku manager.");
+        if (!Shizuku.pingBinder()) {
+            append("Waiting for Shizuku binder… Shizuku itself may already be running.");
+            refreshStatus();
+            return;
+        }
+        if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
+            append("Permission already granted.");
+            bindService();
+        } else if (!Shizuku.shouldShowRequestPermissionRationale()) {
+            Shizuku.requestPermission(REQ_SHIZUKU);
+        } else {
+            append("Permission was denied before. Allow this app in Shizuku manager.");
+        }
     }
 
     private void bindService() {
-        if (!Shizuku.pingBinder()) { append("Shizuku is not running."); return; }
-        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) { requestPermission(); return; }
+        if (service != null || binding) return;
+        if (!Shizuku.pingBinder()) {
+            append("Waiting for Shizuku binder…");
+            refreshStatus();
+            return;
+        }
+        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+            requestPermission();
+            return;
+        }
+        binding = true;
+        refreshStatus();
         Shizuku.UserServiceArgs args = new Shizuku.UserServiceArgs(new ComponentName(this, CopyUserService.class))
-                .daemon(false).processNameSuffix("zipcopy").debuggable(BuildConfig.DEBUG).version(3).tag("deep-obd-zip-v3");
+                .daemon(false).processNameSuffix("zipcopy").debuggable(BuildConfig.DEBUG).version(4).tag("deep-obd-zip-v4");
         Shizuku.bindUserService(args, connection);
     }
 
     private void findNewestZip() {
-        if (service == null) { append("Service not connected; trying to connect…"); bindService(); return; }
+        if (service == null) {
+            append("Service not connected; trying to connect…");
+            bindService();
+            return;
+        }
         new Thread(() -> {
             try {
                 String result = service.findNewestZip(DOWNLOADS);
                 append("Newest ZIP: " + result);
                 if (!result.startsWith("ERROR:")) runOnUiThread(() -> zipPath.setText(result));
-            } catch (RemoteException e) { append("Remote error: " + e); }
+            } catch (RemoteException e) {
+                append("Remote error: " + e);
+            }
         }).start();
     }
 
     private void testDestination() {
-        if (service == null) { append("Service not connected; trying to connect…"); bindService(); return; }
-        new Thread(() -> { try { append(service.testDeepObdAccess()); } catch (RemoteException e) { append("Remote error: " + e); } }).start();
+        if (service == null) {
+            append("Service not connected; trying to connect…");
+            bindService();
+            return;
+        }
+        new Thread(() -> {
+            try { append(service.testDeepObdAccess()); }
+            catch (RemoteException e) { append("Remote error: " + e); }
+        }).start();
     }
 
     private void extractNow() {
-        if (service == null) { append("Service not connected; trying to connect…"); bindService(); return; }
+        if (service == null) {
+            append("Service not connected; trying to connect…");
+            bindService();
+            return;
+        }
         final String path = zipPath.getText().toString().trim();
         append("Extracting: " + path);
-        new Thread(() -> { try { append(service.extractZipToDeepObd(path)); } catch (RemoteException e) { append("Remote error: " + e); } }).start();
+        new Thread(() -> {
+            try { append(service.extractZipToDeepObd(path)); }
+            catch (RemoteException e) { append("Remote error: " + e); }
+        }).start();
     }
 
     @Override protected void onDestroy() {
+        Shizuku.removeBinderReceivedListener(binderReceivedListener);
+        Shizuku.removeBinderDeadListener(binderDeadListener);
         Shizuku.removeRequestPermissionResultListener(permissionListener);
         super.onDestroy();
     }
