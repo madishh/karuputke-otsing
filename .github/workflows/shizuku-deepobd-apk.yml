@@ -7,34 +7,43 @@ on:
       - 'tools/shizuku-deepobd-zip/**'
       - '.github/workflows/shizuku-deepobd-apk.yml'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: tools/shizuku-deepobd-zip
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
       - name: Set up Gradle 8.11.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
-
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
-
-      - name: Upload APK
+      - name: Build release APK
+        run: gradle :app:assembleRelease --stacktrace
+      - name: Prepare named APK
+        run: cp app/build/outputs/apk/release/app-release.apk DeepOBDZipInstaller.apk
+      - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ShizukuDeepOBDZip-debug-apk
-          path: tools/shizuku-deepobd-zip/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
+          name: DeepOBDZipInstaller-apk
+          path: tools/shizuku-deepobd-zip/DeepOBDZipInstaller.apk
+      - name: Publish latest release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: deepobd-latest
+          name: Deep OBD ZIP Installer latest
+          artifacts: tools/shizuku-deepobd-zip/DeepOBDZipInstaller.apk
+          allowUpdates: true
+          replacesArtifacts: true
+          makeLatest: true
+          body: Latest automatic build of the Deep OBD ZIP Installer.

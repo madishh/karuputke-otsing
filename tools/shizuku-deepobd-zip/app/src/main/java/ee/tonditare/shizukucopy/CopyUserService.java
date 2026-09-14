@@ -11,6 +11,8 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.Locale;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -21,9 +23,7 @@ public class CopyUserService extends ICopyService.Stub {
     public CopyUserService() {}
     public CopyUserService(Context context) {}
 
-    private static String q(String s) {
-        return "'" + s.replace("'", "'\\''") + "'";
-    }
+    private static String q(String s) { return "'" + s.replace("'", "'\\''") + "'"; }
 
     private static String run(String command) throws Exception {
         ProcessBuilder pb = new ProcessBuilder("/system/bin/sh", "-c", command);
@@ -38,38 +38,39 @@ public class CopyUserService extends ICopyService.Stub {
         return "exit=" + rc + "\n" + out;
     }
 
-    @Override
-    public String findNewestZip(String downloadDirectory) throws RemoteException {
-        try {
-            File dir = new File(downloadDirectory);
-            if (!dir.isDirectory()) return "ERROR: not a directory: " + downloadDirectory;
-            File newest = null;
-            File[] files = dir.listFiles();
-            if (files != null) {
-                for (File f : files) {
-                    if (!f.isFile()) continue;
-                    if (!f.getName().toLowerCase(Locale.ROOT).endsWith(".zip")) continue;
-                    if (newest == null || f.lastModified() > newest.lastModified()) newest = f;
-                }
-            }
-            return newest == null ? "ERROR: no .zip files in " + downloadDirectory : newest.getAbsolutePath();
-        } catch (Exception e) {
-            return "ERROR: " + e;
-        }
+    private File[] zipFiles(String downloadDirectory) {
+        File dir = new File(downloadDirectory);
+        File[] files = dir.listFiles(f -> f.isFile() && f.getName().toLowerCase(Locale.ROOT).endsWith(".zip"));
+        if (files == null) return new File[0];
+        Arrays.sort(files, Comparator.comparingLong(File::lastModified).reversed());
+        return files;
     }
 
-    @Override
-    public String testDeepObdAccess() throws RemoteException {
+    @Override public String findNewestZip(String downloadDirectory) throws RemoteException {
+        try {
+            File[] files = zipFiles(downloadDirectory);
+            return files.length == 0 ? "ERROR: no .zip files in " + downloadDirectory : files[0].getAbsolutePath();
+        } catch (Exception e) { return "ERROR: " + e; }
+    }
+
+    @Override public String listZipFiles(String downloadDirectory) throws RemoteException {
+        try {
+            File[] files = zipFiles(downloadDirectory);
+            if (files.length == 0) return "ERROR: no .zip files in " + downloadDirectory;
+            StringBuilder out = new StringBuilder();
+            for (File f : files) out.append(f.getAbsolutePath()).append('\n');
+            return out.toString().trim();
+        } catch (Exception e) { return "ERROR: " + e; }
+    }
+
+    @Override public String testDeepObdAccess() throws RemoteException {
         try {
             String cmd = "id; echo PATH=" + q(DEEP_OBD_FILES) + "; mkdir -p " + q(DEEP_OBD_FILES) + " 2>&1; ls -ld " + q(DEEP_OBD_FILES) + " 2>&1";
             return run(cmd);
-        } catch (Exception e) {
-            return "ERROR: " + e;
-        }
+        } catch (Exception e) { return "ERROR: " + e; }
     }
 
-    @Override
-    public String extractZipToDeepObd(String zipPath) throws RemoteException {
+    @Override public String extractZipToDeepObd(String zipPath) throws RemoteException {
         if (zipPath == null || zipPath.trim().isEmpty()) return "ERROR: ZIP path is empty";
         try {
             File zipFile = new File(zipPath.trim());
@@ -87,8 +88,7 @@ public class CopyUserService extends ICopyService.Stub {
 
             String targetCanonical = target.getCanonicalPath();
             String targetPrefix = targetCanonical + File.separator;
-            int files = 0;
-            int dirs = 0;
+            int files = 0, dirs = 0;
             long bytes = 0;
             byte[] buffer = new byte[128 * 1024];
 
@@ -100,7 +100,6 @@ public class CopyUserService extends ICopyService.Stub {
                     File out = new File(target, name);
                     String outCanonical = out.getCanonicalPath();
                     if (!outCanonical.equals(targetCanonical) && !outCanonical.startsWith(targetPrefix)) return "ERROR: unsafe ZIP entry blocked: " + name;
-
                     if (entry.isDirectory()) {
                         if (!out.exists() && !out.mkdirs()) return "ERROR: cannot create directory: " + out;
                         dirs++;
@@ -117,11 +116,8 @@ public class CopyUserService extends ICopyService.Stub {
                     zis.closeEntry();
                 }
             }
-
             return "EXTRACT OK\nZIP: " + zipFile.getAbsolutePath() + "\nTO:  " + target.getAbsolutePath() + "\nfiles: " + files + "\ndirs: " + dirs + "\nbytes: " + bytes;
-        } catch (Exception e) {
-            return "ERROR: " + e;
-        }
+        } catch (Exception e) { return "ERROR: " + e; }
     }
 
     public void destroy() { System.exit(0); }
