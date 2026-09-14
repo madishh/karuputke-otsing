@@ -47,3 +47,5 @@ jobs:
           replacesArtifacts: true
           makeLatest: true
           body: Latest automatic build of the Deep OBD ZIP Installer.
+
+# v6: selectable target folders
