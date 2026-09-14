@@ -1,0 +1,128 @@
+package ee.tonditare.shizukucopy;
+
+import android.content.Context;
+import android.os.RemoteException;
+
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.Locale;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+
+public class CopyUserService extends ICopyService.Stub {
+    private static final String DEEP_OBD_FILES = "/storage/emulated/0/Android/data/de.holeschak.bmw_deep_obd/files";
+
+    public CopyUserService() {}
+    public CopyUserService(Context context) {}
+
+    private static String q(String s) {
+        return "'" + s.replace("'", "'\\''") + "'";
+    }
+
+    private static String run(String command) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder("/system/bin/sh", "-c", command);
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        StringBuilder out = new StringBuilder();
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = br.readLine()) != null) out.append(line).append('\n');
+        }
+        int rc = p.waitFor();
+        return "exit=" + rc + "\n" + out;
+    }
+
+    @Override
+    public String findNewestZip(String downloadDirectory) throws RemoteException {
+        try {
+            File dir = new File(downloadDirectory);
+            if (!dir.isDirectory()) return "ERROR: not a directory: " + downloadDirectory;
+            File newest = null;
+            File[] files = dir.listFiles();
+            if (files != null) {
+                for (File f : files) {
+                    if (!f.isFile()) continue;
+                    if (!f.getName().toLowerCase(Locale.ROOT).endsWith(".zip")) continue;
+                    if (newest == null || f.lastModified() > newest.lastModified()) newest = f;
+                }
+            }
+            return newest == null ? "ERROR: no .zip files in " + downloadDirectory : newest.getAbsolutePath();
+        } catch (Exception e) {
+            return "ERROR: " + e;
+        }
+    }
+
+    @Override
+    public String testDeepObdAccess() throws RemoteException {
+        try {
+            String cmd = "id; echo PATH=" + q(DEEP_OBD_FILES) + "; mkdir -p " + q(DEEP_OBD_FILES) + " 2>&1; ls -ld " + q(DEEP_OBD_FILES) + " 2>&1";
+            return run(cmd);
+        } catch (Exception e) {
+            return "ERROR: " + e;
+        }
+    }
+
+    @Override
+    public String extractZipToDeepObd(String zipPath) throws RemoteException {
+        if (zipPath == null || zipPath.trim().isEmpty()) return "ERROR: ZIP path is empty";
+        try {
+            File zipFile = new File(zipPath.trim());
+            if (!zipFile.isFile()) return "ERROR: ZIP does not exist: " + zipFile;
+            if (!zipFile.getName().toLowerCase(Locale.ROOT).endsWith(".zip")) return "ERROR: selected file is not .zip: " + zipFile.getName();
+
+            String zipName = zipFile.getName();
+            String folderName = zipName.substring(0, zipName.length() - 4);
+            if (folderName.trim().isEmpty()) return "ERROR: ZIP filename has no usable folder name";
+
+            File base = new File(DEEP_OBD_FILES);
+            if (!base.exists() && !base.mkdirs()) return "ERROR: cannot create/access Deep OBD files directory: " + base;
+            File target = new File(base, folderName);
+            if (!target.exists() && !target.mkdirs()) return "ERROR: cannot create target directory: " + target;
+
+            String targetCanonical = target.getCanonicalPath();
+            String targetPrefix = targetCanonical + File.separator;
+            int files = 0;
+            int dirs = 0;
+            long bytes = 0;
+            byte[] buffer = new byte[128 * 1024];
+
+            try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(zipFile), 128 * 1024))) {
+                ZipEntry entry;
+                while ((entry = zis.getNextEntry()) != null) {
+                    String name = entry.getName();
+                    if (name == null || name.isEmpty()) { zis.closeEntry(); continue; }
+                    File out = new File(target, name);
+                    String outCanonical = out.getCanonicalPath();
+                    if (!outCanonical.equals(targetCanonical) && !outCanonical.startsWith(targetPrefix)) return "ERROR: unsafe ZIP entry blocked: " + name;
+
+                    if (entry.isDirectory()) {
+                        if (!out.exists() && !out.mkdirs()) return "ERROR: cannot create directory: " + out;
+                        dirs++;
+                    } else {
+                        File parent = out.getParentFile();
+                        if (parent != null && !parent.exists() && !parent.mkdirs()) return "ERROR: cannot create parent directory: " + parent;
+                        try (BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(out), 128 * 1024)) {
+                            int n;
+                            while ((n = zis.read(buffer)) != -1) { bos.write(buffer, 0, n); bytes += n; }
+                        }
+                        if (entry.getTime() > 0) out.setLastModified(entry.getTime());
+                        files++;
+                    }
+                    zis.closeEntry();
+                }
+            }
+
+            return "EXTRACT OK\nZIP: " + zipFile.getAbsolutePath() + "\nTO:  " + target.getAbsolutePath() + "\nfiles: " + files + "\ndirs: " + dirs + "\nbytes: " + bytes;
+        } catch (Exception e) {
+            return "ERROR: " + e;
+        }
+    }
+
+    public void destroy() { System.exit(0); }
+}
